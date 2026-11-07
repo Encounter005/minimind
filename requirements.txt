@@ -15,7 +15,7 @@ pydantic==2.11.5
 rich==13.7.1
 scikit_learn==1.5.1
 sentence_transformers==2.3.1
-sentencepiece==0.2.0
+sentencepiece==0.2.1
 simhash==2.1.2
 tiktoken==0.10.0
 transformers==4.57.6
