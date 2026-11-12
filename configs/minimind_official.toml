@@ -1,0 +1,90 @@
+# 复刻官方 trainer/train_pretrain.py 的默认训练配置（给服务器用）
+#
+# 官方默认值 → 本文件字段映射：
+#   hidden_size=768                  → [model] n_embd
+#   num_hidden_layers=8              → [model] n_layer
+#   num_attention_heads=8            → [model] n_head
+#   num_key_value_heads=4            → [model.extras] n_kv_head
+#   max_position_embeddings=32768    → [model.extras] max_position_embeddings
+#   max_seq_len=340                  → [data] block_size（官方 340 是显存妥协，不是语义长度）
+#   batch_size=32, accumulation=8    → [data] batch_size × [train] grad_accum
+#   learning_rate=5e-4               → [optim] lr；官方 get_lr 下限 0.1×lr → min_lr=5e-5
+#   AdamW() 默认值                    → weight_decay=0.01, betas=(0.9, 0.999)
+#   grad_clip=1.0, dtype=bfloat16    → [optim] grad_clip / [train] amp
+#   epochs=2                         → [train] max_iters（见下）
+#   seed=42                          → [train] seed
+#   _tied_weights_keys（lm_head 与 embedding 共享）→ 本文件设 tie_embeddings = false，见文末说明
+#
+# 步数换算：官方按「样本数 × epoch」推进（1.27M 样本 / 32 / 8 ≈ 4961 步/epoch，2 epoch = 9922 步），
+#   其中每条样本 340 token 含 padding。本训练器用「拼接后的连续 token 流」，无 padding，
+#   所以同样 2 个 epoch 对应 max_iters = 2 × N_tokens / (32×340×8)；实测 N = 235,469,683 → **5411 步**。
+#   若你要的是官方那个「9922 步」的数字而非同样的数据预算，把 max_iters 与 lr_decay_iters 都改成 9922（会多跑约 1.9 倍 token）。
+#
+# 注意：my_trainer 不支持 DDP。服务器多卡时这条配置只吃一张卡；要压满显存就等比放大
+#   [data] batch_size 同时缩小 [train] grad_accum（保持 batch_size × grad_accum × 340 = 87040 token/步）。
+
+[data]
+name = "pretrain_full"      # dataset/pretrain_full/{train,val}.bin（全量 pretrain_t2t_mini.jsonl）
+root = "dataset"
+reader = "memmap"
+tokenizer = "hf:model"      # 仓库自带 6400 词表
+batch_size = 32
+block_size = 340
+
+[model]
+name = "minimind"
+location = "src/minimind/trainer_plugin.py"
+block_size = 340
+n_layer = 8
+n_head = 8
+n_embd = 768
+bias = false                # 官方全部投影 bias=False（此字段被适配器忽略）
+
+[model.extras]
+n_kv_head = 4
+rope_theta = 1.0e6
+max_position_embeddings = 32768     # 官方 RoPE 表建到 32768，训练只用前 340
+tie_embeddings = false              # 见文件末尾说明：本仓库主干没有官方那套 0.02 初始化，tie 会让初始 loss 直接到 60
+
+[optim]
+lr = 5.0e-4
+min_lr = 5.0e-5
+weight_decay = 0.01
+betas = [0.9, 0.999]
+grad_clip = 1.0
+warmup_iters = 0            # 官方无 warmup，lr 从 5e-4 直接 cosine 衰减
+lr_decay_iters = 5411
+
+[train]
+max_iters = 5411            # 2 × 235,469,683 token / 87040 = 2 个 epoch（整份 bin）
+grad_accum = 8
+amp = "bf16"
+eval_interval = 250
+eval_iters = 20
+log_interval = 50
+seed = 42
+
+[run]
+name = "minimind_official"
+resume = "auto"
+save_interval = 500
+
+[log]
+console = true
+progress = true
+file = true
+tensorboard = false
+
+[sample]
+prompt = "给我生成一首有关秋天的诗歌。"
+max_new_tokens = 100
+temperature = 0.8
+top_k = 40
+
+# 关于 tie_embeddings（为什么这里是 false）
+#   官方 MiniMindForCausalLM 用 transformers 的 _init_weights（initializer_range=0.02）初始化
+#   embedding 与 lm_head，权重很小，所以绑定权重后 logits 尺度正常。
+#   src/minimind 的主干用 PyTorch 默认初始化：nn.Embedding 是 N(0,1)，RMSNorm 输出 RMS≈1，
+#   绑定后 logits 的标准差 ≈ sqrt(hidden)=27，softmax 直接饱和 —— 实测初始 loss 60.3（未绑定为 8.94）。
+#   因此本文件不绑定权重：参数量 68.8M（官方 63.9M），多出来的 4.9M 就是独立的词表投影。
+#   若要严格复刻 63.9M，需要给主干补一套 0.02 的权重初始化（未包含在本次改动里）。

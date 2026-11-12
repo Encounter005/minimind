@@ -1,0 +1,66 @@
+# MiniModel 单小时正式训练（H512 / 8 层 / GQA 8:4，33.3M 参数）
+#
+# 实测依据（RTX 3070 Ti Laptop 8GB，bf16）：
+#   bench 153.5 ms/step，真实训练 200 步墙钟 34.9s ≈ 160 ms/step，显存 4.97 GB（含桌面占用）
+#   21000 步 × 8192 token = 172M token ≈ 全量 mini 语料（~226M token）的 0.76 个 epoch
+#   预估墙钟 ≈ 56 min（含 84 次 eval、10 次存档、末尾采样）
+#
+# 用法（仓库根目录）：
+#   .venv/bin/python -m my_trainer.data.prepare_minimind --jsonl dataset/pretrain_t2t_mini.jsonl --out dataset/pretrain_full
+#   .venv/bin/python -m my_trainer.train  configs/minimind_1h.toml
+#   .venv/bin/python -m my_trainer.sample configs/minimind_1h.toml
+
+[data]
+name = "pretrain_mini"
+root = "dataset"
+reader = "memmap"
+tokenizer = "hf:model"      # 仓库自带的 6400 词表
+batch_size = 16             # 16×512 = 8192 token/步；bs24 吞吐只多 0.4%，显存多 ~2GB，不值
+block_size = 512
+
+[model]
+name = "minimind"
+location = "src/minimind/trainer_plugin.py"
+block_size = 512
+n_layer = 8
+n_head = 8
+n_embd = 512
+bias = false                # MiniMind 全部投影不带 bias，此字段被适配器忽略
+
+[model.extras]
+n_kv_head = 4               # GQA：8 个 query head 共用 4 个 kv head
+rope_theta = 1.0e6
+
+[optim]
+lr = 1.0e-3
+min_lr = 1.0e-4
+weight_decay = 0.1
+grad_clip = 1.0
+warmup_iters = 500          # ≈1.5% 的步数，约 4M token
+lr_decay_iters = 21000      # 与 max_iters 对齐，cosine 衰减到底
+
+[train]
+max_iters = 21000
+grad_accum = 1
+amp = "bf16"
+eval_interval = 250
+eval_iters = 20
+log_interval = 50
+seed = 1337
+
+[run]
+name = "minimind_1h"
+resume = "auto"             # 中断后重跑同一条命令即续训
+save_interval = 2000
+
+[log]
+console = true
+progress = true
+file = true
+tensorboard = false
+
+[sample]
+prompt = "给我生成一首有关秋天的诗歌。"
+max_new_tokens = 100
+temperature = 0.8
+top_k = 40
