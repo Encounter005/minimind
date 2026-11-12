@@ -79,8 +79,9 @@ class RoPE(nn.Module):
         # 频率表由 _build_angles() 决定，子类覆写它就能换用别的频率表（如 YaRN）
         angles, attention_factor = self._build_angles()
         cos, sin = build_cos_sin(angles, attention_factor)
-        self.register_buffer('cos_cached', cos)
-        self.register_buffer('sin_cached', sin)
+        # persistent=False：不加进 state_dict，避免与实际权重文件对不上 key
+        self.register_buffer('cos_cached', cos, persistent=False)
+        self.register_buffer('sin_cached', sin, persistent=False)
 
     def _build_angles(self):
         """
@@ -102,15 +103,17 @@ class RoPE(nn.Module):
         Args:
             q: Query，shape (batch, seq_len, num_heads, head_dim)
             k: Key，shape (batch, seq_len, num_heads, head_dim)
-            positions: 位置索引，默认为 [0, 1, 2, ..., seq_len-1]
+            positions: 绝对位置索引，默认为 [0, 1, 2, ..., seq_len-1]；
+                带 KV cache 逐 token 解码时要传 [start_pos, ..., start_pos+seq_len-1]
 
         Returns:
             q_rot, k_rot: 旋转后的 Query 和 Key
         """
-        seq_len = q.shape[1]
+        if positions is None:
+            positions = torch.arange(q.shape[1], device=q.device)
 
-        cos = self.cos_cached[:seq_len]
-        sin = self.sin_cached[:seq_len]
+        cos = self.cos_cached[positions]
+        sin = self.sin_cached[positions]
 
         q_rot, k_rot = self._apply_rotary_pos_emb(q, k, cos, sin)
 
@@ -145,8 +148,8 @@ class RoPE(nn.Module):
             return torch.cat([-x2, x1], dim=-1)
 
         # 调整cos sin维度方便广播[seq_len, dim] -> [1, seq_len, 1, dim]
-        cos = cos.unsqueeze(0).unsqueeze(2)
-        sin = sin.unsqueeze(0).unsqueeze(2)
+        cos = cos.unsqueeze(0).unsqueeze(2).type_as(q)
+        sin = sin.unsqueeze(0).unsqueeze(2).type_as(q)
 
         # apply rotate
         q_embed: Tensor = (q * cos) + rotate_half(q) * sin
