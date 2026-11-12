@@ -1,0 +1,87 @@
+# 官方模型（model/model_minimind.py 的 MiniMindForCausalLM）+ my_trainer 跑官方 train_pretrain 配方
+#
+# 与 configs/minimind_official.toml 的区别：那份跑的是 src/minimind 的手工复刻版；这份直接跑仓库里的官方
+# transformers 实现——参数、0.02 初始化、RoPE、generate 全是官方代码，因此可以保留 tie_word_embeddings = true，
+# 参数量 63,912,192，与官方发布的 63.9M 一致。
+#
+# 用法（仓库根目录；适配器靠 cwd 找到 model 包）：
+#   .venv/bin/python -m my_trainer.bench  configs/minimind_official_pytorch.toml
+#   .venv/bin/python -m my_trainer.train  configs/minimind_official_pytorch.toml
+#   .venv/bin/python -m my_trainer.sample configs/minimind_official_pytorch.toml
+#
+# 官方默认值 → 本文件字段：
+#   hidden_size=768 / num_hidden_layers=8 / num_attention_heads=8 → [model] n_embd / n_layer / n_head
+#   num_key_value_heads=4 / rope_theta=1e6 / max_position_embeddings=32768 → [model.extras]
+#   max_seq_len=340、batch_size=32、accumulation=8   → [data] block_size、batch_size × [train] grad_accum
+#   learning_rate=5e-4，cosine 衰减到 0.1×lr        → [optim] lr / min_lr（官方无 warmup）
+#   AdamW() 默认 → weight_decay=0.01, betas=(0.9, 0.999)；grad_clip=1.0、dtype=bfloat16 → [optim] / [train] amp
+#   seed=42、epochs=2                                → [train] seed / max_iters
+#
+# 步数换算：官方按「1.27M 样本 × 340 token（含 padding）」推进，2 epoch ≈ 9922 步；
+#   那份数据是 padding 槽位，真实 token 只有 2.3 亿。本训练器用「拼接后的连续 token 流」，没有 padding，
+#   所以同样 2 个 epoch 对应 dataset/pretrain_mini 的 230,760,291 个 train token：
+#   2 × 230,760,291 / (32 × 340 × 8) = **5303 步**。
+#   要的是官方那个「9922 步」的数字而非同样的 token 预算，就把 max_iters 与 lr_decay_iters 都改成 9922（多跑 1.9 倍 token）。
+#
+# 显存：RTX 3070 Ti Laptop 8GB 实测 32×340 bf16 单步 ≈ 285 ms、峰值 ≈ 5.76 GB。
+#   本训练器不支持 DDP，服务器多卡时这份配置只吃一张卡；要压满显存就等比放大 [data] batch_size
+#   并缩小 [train] grad_accum，保持 batch_size × grad_accum × 340 = 87040 token/步。
+
+[data]
+name = "pretrain_mini"      # dataset/pretrain_mini/{train,val}.bin（pretrain_t2t_mini.jsonl 全量，max_length=256）
+root = "dataset"
+reader = "memmap"
+tokenizer = "hf:model"      # 仓库自带 6400 词表
+batch_size = 32
+block_size = 340
+
+[model]
+name = "minimind_official"
+location = "src/minimind_official/plugin.py"
+block_size = 340
+n_layer = 8
+n_head = 8
+n_embd = 768
+dropout = 0.0
+bias = false                # 官方实现本身没有 bias，此字段被适配器忽略
+
+[model.extras]
+num_key_value_heads = 4     # GQA：8 个 query head 共用 4 个 kv head
+rope_theta = 1.0e6
+max_position_embeddings = 32768     # 官方 RoPE 表建到 32768，训练只用前 340
+tie_word_embeddings = true  # 官方 post_init 做 initializer_range=0.02 初始化，绑定后初始 loss 8.93（ln 6400 = 8.76）
+
+[optim]
+lr = 5.0e-4
+min_lr = 5.0e-5
+weight_decay = 0.01
+betas = [0.9, 0.999]
+grad_clip = 1.0
+warmup_iters = 0            # 官方无 warmup，lr 从 5e-4 直接 cosine 衰减
+lr_decay_iters = 5303
+
+[train]
+max_iters = 5303            # 2 × 230,760,291 token / 87040 = 2 个 epoch（整份 train.bin）
+grad_accum = 8
+amp = "bf16"
+eval_interval = 250
+eval_iters = 20
+log_interval = 50
+seed = 42
+
+[run]
+name = "minimind_official_pytorch"
+resume = "auto"
+save_interval = 500
+
+[log]
+console = true
+progress = true
+file = true
+tensorboard = false
+
+[sample]
+prompt = "给我生成一首有关秋天的诗歌。"
+max_new_tokens = 100
+temperature = 0.8
+top_k = 40
