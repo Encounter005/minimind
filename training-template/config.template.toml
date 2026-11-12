@@ -1,0 +1,125 @@
+# ============================================================================
+# my_trainer 配置模板：复制成 configs/<实验名>.toml 后按需修改
+#
+#   python -m my_trainer.train  configs/<实验名>.toml
+#   python -m my_trainer.sample configs/<实验名>.toml
+#   python -m my_trainer.bench  configs/<实验名>.toml
+#   python -m my_trainer.sweep  configs/<实验名>.toml
+#
+# 约定：
+#   * 配置文件是唯一来源，没有命令行覆盖，改参数 = 改这份文件
+#   * 省略任何字段都会用默认值（下面写的全就是默认值，直接跑也能用）
+#   * 键名写错会报错，并提示最接近的字段名
+#   * 配置里的每一节在代码里对应一个 dataclass：src/my_trainer/configs.py
+#   * 字段含义与排错见 docs/training-template/使用手册.md；现成例子见 configs/*.toml
+# ============================================================================
+
+# ---------------------------------- 数据 -----------------------------------
+[data]
+name = "shakespeare_char"  # 数据集目录名，数据放在 data/<name>/{train,val}.bin
+root = "data"              # 数据根目录
+reader = "memmap"          # 数据实现：memmap（.bin + meta.pkl）| hf（HuggingFace，需联网）
+
+# 分词器，必须与准备数据时用的完全一致：
+#   ""                         自动：有 meta.pkl 用字符级字表，没有就用 GPT-2 BPE
+#   "tiktoken:p50k_base"       tiktoken 内置编码（gpt2 / r50k_base / p50k_base；词表须 ≤ 65535）
+#   "hf:bert-base-uncased"     HuggingFace tokenizer（仓库 id 或本地目录；词表须 ≤ 65535）
+#   "<类型>:<参数>"            用 @register_tokenizer 注册过的自定义类型（源码见下面的 tokenizer_location）
+tokenizer = ""
+
+# 自定义分词器的实现源码（.py，相对仓库根）：import 时执行里面的 @register_tokenizer；内置类型留空
+tokenizer_location = ""
+batch_size = 12            # 每个 micro-batch 的样本数
+block_size = 256           # 上下文长度，不能超过 [model] block_size
+
+# ---------------------------------- 模型 -----------------------------------
+[model]
+name = "gpt"               # 注册名：gpt（根目录 model.py）| toy_rnn | gpt_v0（src/gpt.py）| gpt-v1（src/gptv1.py）
+
+# 模型实现源码（.py，相对仓库根）：import 时执行里面的 @register_model，上面就能填它的注册名；内置模型留空
+location = ""
+
+block_size = 256           # 最大位置数，必须 >= [data] block_size
+n_layer = 4                # Transformer 层数
+n_head = 4                 # 注意力头数；n_embd 必须能被它整除
+n_embd = 128               # 隐藏维度
+
+# 0.0 = 不丢；小语料/多轮训练建议 0.1 ~ 0.3，防止过拟合
+dropout = 0.0
+bias = true                # Linear / LayerNorm 是否带 bias
+
+# 交给具体模型自己解释的额外超参，例如 { "hidden_scale" = 4 }；
+# 内置模型都不读它，加自定义模型时按需使用
+extras = {}
+
+# --------------------------------- 优化器 ----------------------------------
+[optim]
+lr = 0.001                 # 峰值学习率（warmup 结束后达到）
+min_lr = 0.0001            # cosine 衰减末端，不能大于 lr
+weight_decay = 0.1         # 只作用于二维参数；bias / LayerNorm 不衰减
+betas = [0.9, 0.95]        # AdamW betas（TOML 写列表，内部转成元组）
+grad_clip = 1.0            # 梯度裁剪阈值，0 表示不裁剪
+warmup_iters = 50          # 线性预热步数
+lr_decay_iters = 500       # cosine 衰减到 min_lr 的步数，一般与 max_iters 接近
+
+# ---------------------------------- 训练 -----------------------------------
+[train]
+max_iters = 500            # 总优化步数（按优化器步计，不是 micro-batch）
+grad_accum = 1             # 梯度累积：等效 batch = batch_size * grad_accum
+amp = "none"               # none | bf16 | fp16（fp16 仅在 GPU 上可用）
+compile = false            # torch.compile 训练前向：快 ~1.5x，但首次前向慢几十秒
+eval_interval = 100        # 每多少步评估一次（同时存档）
+eval_iters = 20            # 评估时取多少个 val batch 求平均
+log_interval = 10          # 每多少步打一次训练指标
+seed = 1337                # 随机种子
+
+# ---------------------------------- 运行 -----------------------------------
+[run]
+out_root = "runs"          # 产物根目录
+name = "debug"             # 实验名：产物落在 out_root/name/ 下
+
+# auto = 有 GPU 就用；cpu / cuda / cuda:1 都可以写
+device = "auto"
+
+# auto  = 该目录有 ckpt.pt 就从下一步继续
+# none  = 忽略已有存档，从头跑（会覆盖同名目录的存档）
+# 路径  = 从指定存档接续，例如 "runs/gpt-v0/ckpt.pt"
+resume = "auto"
+
+save_interval = 100        # 额外存档间隔（评估时也会存）
+sample_after_train = true  # 训练结束自动采样到 samples.txt
+
+# ---------------------------------- 日志 -----------------------------------
+[log]
+console = true             # 控制台输出（progress=false 时逐行打印指标）
+progress = true            # 用 tqdm 进度条代替逐行打印，右侧显示 loss / lr / val
+file = true                # 写 metrics.jsonl（sweep 汇总读它）
+tensorboard = true         # 写 tb/：tensorboard --logdir runs
+graph = false              # 把前向计算图写进 TensorBoard 的 Graphs 面板
+wandb = false              # 打开需要 WANDB_API_KEY；默认关闭，不联网
+wandb_project = "my_trainer-template"  # wandb 里的项目名；wandb = false 时忽略
+
+# ---------------------------------- 采样 -----------------------------------
+[sample]
+ckpt = ""                  # 空 = runs/<run.name>/ckpt.pt
+prompt = "\n"              # 起始文本；字符级数据按字符编码，空串等价于换行
+max_new_tokens = 200       # 生成长度
+temperature = 1.0          # 采样温度：<1 更保守，>1 更随机
+top_k = 0                  # 0 = 不截断；例如 50 只从前 50 个 token 里采样
+
+# ------------------------------- 性能基准 ----------------------------------
+[bench]
+iters = 10                 # 计时步数（不计 warmup）
+warmup = 3                 # 预热步数，让显卡/缓存进入稳定状态
+
+# ------------------------------- 超参搜索 ----------------------------------
+[sweep]
+name = "sweep"             # 汇总目录：runs/<name>/<run_id>/
+mode = "grid"              # grid = 全组合 | random = 随机采样 num_samples 组
+
+# 只支持「小节.字段」形式的键，启动时统一校验；例如：
+# space = { "optim.lr" = [1e-3, 3e-4], "model.n_layer" = [2, 4] }
+space = {}
+
+num_samples = 8            # 仅 random 模式有效
+seed = 0                   # 仅 random 模式有效

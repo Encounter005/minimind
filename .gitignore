@@ -4,3 +4,9 @@ __pycache__/
 out
 website/
 docs-minimind/
+
+# 由 configs/minimind_smoke.toml 与 prepare_minimind 生成，不进仓库
+runs/
+dataset/*.jsonl
+dataset/pretrain_full/
+dataset/minimind_smoke/
